@@ -57,15 +57,40 @@ def _load_las(path):
 
 def _load_text(path):
     """Load a text/CSV file as a point cloud."""
-    data = np.loadtxt(str(path))
-    if data.ndim == 1:
-        data = data.reshape(1, -1)
+    import csv
 
-    points = data[:, :3]
+    with open(path, "r") as f:
+        reader = csv.reader(f)
+        header_row = next(reader)
+        # Strip comment prefixes (e.g. "//X" -> "X")
+        header_row = [h.lstrip("/").strip() for h in header_row]
+
+        rows = list(reader)
+
+    if not rows:
+        points = np.empty((0, 3), dtype=np.float64)
+        return {"points": points, "fields": {}, "header": None}
+
+    # Determine which columns are numeric by inspecting the first data row
+    n_cols = len(header_row)
+    is_numeric = []
+    for val in rows[0]:
+        try:
+            float(val)
+            is_numeric.append(True)
+        except ValueError:
+            is_numeric.append(False)
+
+    # XYZ are always the first 3 columns
+    points = np.array([[float(row[i]) for i in range(3)] for row in rows], dtype=np.float64)
+
     fields = {}
-    # If there are more than 3 columns, treat them as unnamed fields
-    for i in range(3, data.shape[1]):
-        fields[f"field_{i-3}"] = data[:, i]
+    for col_idx in range(3, min(n_cols, len(is_numeric))):
+        col_name = header_row[col_idx] if col_idx < len(header_row) else f"field_{col_idx - 3}"
+        if is_numeric[col_idx]:
+            fields[col_name] = np.array([float(row[col_idx]) for row in rows], dtype=np.float64)
+        else:
+            fields[col_name] = np.array([row[col_idx] for row in rows])
 
     return {"points": points, "fields": fields, "header": None}
 

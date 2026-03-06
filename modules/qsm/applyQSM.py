@@ -10,8 +10,17 @@ from scipy import interpolate
 from scipy.signal import medfilt
 
 # from sklearn.cluster import mean_shift
-import cut_pursuit_py
-from circle_fit import riemannSWFLa
+try:
+    import cut_pursuit_py
+    HAS_CUT_PURSUIT = True
+except ImportError:
+    HAS_CUT_PURSUIT = False
+
+try:
+    from circle_fit import riemannSWFLa
+    HAS_CIRCLE_FIT = True
+except ImportError:
+    HAS_CIRCLE_FIT = False
 
 
 import xml.etree.ElementTree as ET
@@ -323,16 +332,27 @@ def branchSegmentation(branch_pts,K=5, reg_strength=1.0,resolution=0.0):
     # Edge weights
     edge_weights = np.ones_like(eu, dtype=np.float32)*reg_strength
 
-    # Perform cut pursuit
-    labels = cut_pursuit_py.perform_cut_pursuit(
-        reg_strength=reg_strength,  # Regularization strength
-        D=3,  # Dimension of points
-        pc_vec=pts_dec.astype(np.float32),  # Point cloud
-        edge_weights=edge_weights,
-        Eu=eu.astype(np.uint32),
-        Ev=ev.astype(np.uint32),
-        verbose=True
-    )
+    # Perform cut pursuit or DBSCAN fallback
+    if HAS_CUT_PURSUIT:
+        labels = cut_pursuit_py.perform_cut_pursuit(
+            reg_strength=reg_strength,  # Regularization strength
+            D=3,  # Dimension of points
+            pc_vec=pts_dec.astype(np.float32),  # Point cloud
+            edge_weights=edge_weights,
+            Eu=eu.astype(np.uint32),
+            Ev=ev.astype(np.uint32),
+            verbose=True
+        )
+    else:
+        from sklearn.cluster import DBSCAN
+        print("Warning: cut_pursuit_py not installed. Using DBSCAN fallback for branch segmentation.")
+        eps = np.median(np.linalg.norm(pts_dec[nn_idx[:, 1]] - pts_dec, axis=1)) * 2.0
+        clustering = DBSCAN(eps=eps, min_samples=3, n_jobs=-1).fit(pts_dec)
+        labels = clustering.labels_
+        noise_mask = labels == -1
+        if np.any(noise_mask):
+            max_label = labels.max() + 1
+            labels[noise_mask] = np.arange(max_label, max_label + noise_mask.sum())
     if resolution>0:
         return labels[block_inverse_idx],len(np.unique(labels))
     else:
@@ -484,7 +504,12 @@ def calculateRadius(pts,tree,segs_centroids,min_r=0.04):# this needs to be impro
                 segs_prj = np.dot(segs_vec, segs_centroid_dir[i,:3])
                 segs_prj_2d=pts[segs_centroids_group[node],:2] - np.outer(segs_prj, segs_centroid_dir[i,:3])[:, :2]
                 r0=np.median(np.sqrt(np.sum(np.power(segs_prj_2d-np.mean(segs_prj_2d,0),2),axis=1)))
-                xc, yc, r, sigma = riemannSWFLa(segs_prj_2d)
+                if HAS_CIRCLE_FIT:
+                    xc, yc, r, sigma = riemannSWFLa(segs_prj_2d)
+                else:
+                    # Fallback: use median radius as estimate
+                    r = r0
+                    sigma = 0.0
                 if sigma/r>0.3:#only fit circles when the branches or stems are large enough
                     path_centroid_radius.append(np.array([segs_centroids[node,0],segs_centroids[node,1],segs_centroids[node,2],r0]))
                 else:

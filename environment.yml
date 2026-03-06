@@ -1,0 +1,24 @@
+name: treeaibox
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - scikit-learn
+  - scikit-image
+  - pytorch
+  - laspy
+  - tqdm
+  - matplotlib
+  - jupyter
+  - pytest
+  - pip
+  - pip:
+    - numpy-indexed
+    - numpy-groupies
+    - timm
+    - requests
+    - "laspy[lazrs]"

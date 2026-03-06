@@ -7,7 +7,11 @@ from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import dijkstra
 
-from cut_pursuit_py import _cut_pursuit
+try:
+    from cut_pursuit_py import _cut_pursuit
+    HAS_CUT_PURSUIT = True
+except ImportError:
+    HAS_CUT_PURSUIT = False
 
 def decimate_pcd(columns,min_res):
     _, block_idx_uidx, block_inverse_idx = np.unique(np.floor(columns[:,:3]/min_res).astype(np.int32),axis=0, return_index=True, return_inverse=True)
@@ -67,7 +71,45 @@ def filter_g(g):#get the mode value among the positive values
     else:
         return 0
 
+def _fallback_dbscan_segmentation(points, min_res=0.15, eps=None, min_samples=5, progress_callback=lambda x: None):
+    """DBSCAN-based fallback for cut_pursuit segmentation.
+
+    Used when cut_pursuit_py is not installed. Provides similar oversegmentation
+    using sklearn's DBSCAN algorithm.
+    """
+    from sklearn.cluster import DBSCAN
+
+    dec_idx_uidx, dec_inverse_idx = decimate_pcd(points[:, :3], min_res)
+    pcd_dec = points[dec_idx_uidx, :3]
+
+    progress_callback(10)
+
+    if eps is None:
+        eps = min_res * 3.0
+
+    clustering = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit(pcd_dec)
+    labels = clustering.labels_
+
+    # Relabel noise points (-1) to unique individual labels
+    noise_mask = labels == -1
+    if np.any(noise_mask):
+        max_label = labels.max() + 1
+        labels[noise_mask] = np.arange(max_label, max_label + noise_mask.sum())
+
+    progress_callback(60)
+
+    if min_res > 0:
+        return labels[dec_inverse_idx], len(np.unique(labels))
+    else:
+        return labels, len(np.unique(labels))
+
+
 def init_cutpursuit(points,min_res=0.15,K = 5,reg_strength = 1.0, progress_callback=lambda x: None):
+    if not HAS_CUT_PURSUIT:
+        print("Warning: cut_pursuit_py not installed. Using DBSCAN fallback for segmentation.")
+        print("  For best results, install cut_pursuit_py: pip install cut-pursuit")
+        return _fallback_dbscan_segmentation(points, min_res=min_res, progress_callback=progress_callback)
+
     dec_idx_uidx, dec_inverse_idx = decimate_pcd(points[:, :3], min_res)  # reduce points first
     pcd_dec = points[dec_idx_uidx,:3]
 

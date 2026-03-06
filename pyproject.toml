@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treeaibox"
+version = "2.0.0"
+description = "LiDAR-based forest analysis: tree detection, segmentation, and structure modeling"
+readme = "README.md"
+license = {text = "CC-BY-NC-4.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Zhouxin Xi", email = "zhouxin.xi@nrcan-rncan.gc.ca"},
+]
+keywords = ["lidar", "point-cloud", "forest", "tree", "segmentation", "deep-learning"]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "scikit-image",
+    "laspy[lazrs]",
+    "torch",
+    "numpy-indexed",
+    "numpy-groupies",
+    "timm",
+    "requests",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib"]
+qsm = ["circle-fit"]
+all = ["matplotlib", "circle-fit"]
+
+[tool.setuptools]
+py-modules = ["treeaibox", "treeaibox_io", "treeaibox_models", "treeaibox_viz"]
+packages = ["modules", "modules.filter", "modules.treeisonet", "modules.qsm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -44,16 +44,22 @@ def _check_existing_classification(fields, func_name):
 
 
 def _make_progress_callback(progress_callback=None):
-    """Create a progress callback, using tqdm if none provided and in a notebook."""
+    """Create a progress callback, using tqdm if none provided and in a notebook.
+
+    Uses tqdm.auto which automatically selects the notebook widget in Jupyter
+    and falls back to the terminal bar in scripts/CLI.
+    """
     if progress_callback is not None:
         return progress_callback
 
     try:
         from tqdm.auto import tqdm
-        pbar = tqdm(total=100, desc="Processing", unit="%")
+        pbar = tqdm(total=100, desc="Processing", unit="%",
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
         last_val = [0]
 
         def _tqdm_callback(val):
+            val = min(val, 100)
             delta = val - last_val[0]
             if delta > 0:
                 pbar.update(delta)

@@ -14,10 +14,33 @@ Usage::
 
 import sys
 import os
+import warnings
 import numpy as np
 
 from treeaibox_models import get_model_path, get_config_path, list_available_models
 from treeaibox_io import load_point_cloud, save_point_cloud
+
+_CLASSIFICATION_FIELD_NAMES = {
+    "classification", "class", "class_i", "treefilter",
+    "label", "labels", "tree_id", "stemcls",
+}
+
+
+def _check_existing_classification(fields, func_name):
+    """Check if fields contain existing classification data.
+
+    Returns True (and warns) if classification fields are found.
+    """
+    if not fields:
+        return False
+    found = [k for k in fields if k.lower() in _CLASSIFICATION_FIELD_NAMES]
+    if found:
+        warnings.warn(
+            f"{func_name}: Points already have classification fields: {found}. "
+            "Set check_classified=False to run anyway."
+        )
+        return True
+    return False
 
 
 def _make_progress_callback(progress_callback=None):
@@ -48,7 +71,8 @@ def _make_progress_callback(progress_callback=None):
 # ---------------------------------------------------------------------------
 
 def tree_filtering(points, model_name, use_cuda=True, if_bottom_only=True,
-                   progress_callback=None, auto_download=True):
+                   progress_callback=None, auto_download=True,
+                   check_classified=True, fields=None):
     """Classify points using a deep learning filter model.
 
     Works for TreeFiltering, UrbanFiltering, WoodCls, and StemCls models.
@@ -67,15 +91,22 @@ def tree_filtering(points, model_name, use_cuda=True, if_bottom_only=True,
         Called with progress percentage (0-100).
     auto_download : bool
         Automatically download model if not found locally.
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
-        Integer classification labels for each point.
+    np.ndarray or None
+        Integer classification labels for each point, or None if already classified.
         For TreeFiltering: 1=ground/understory, 2=overstory vegetation.
         For UrbanFiltering: 1-7 class labels.
         For WoodCls: stem vs branch classification.
     """
+    if check_classified and _check_existing_classification(fields, "tree_filtering"):
+        return None
+
     from modules.filter.componentFilter import filterPoints
 
     config_file = get_config_path(model_name)
@@ -108,7 +139,8 @@ urban_filtering = tree_filtering
 
 def tree_location(points, model_name, use_cuda=True, if_stem=False,
                   cutoff_thresh=1.0, custom_resolution=None,
-                  progress_callback=None, auto_download=True):
+                  progress_callback=None, auto_download=True,
+                  check_classified=True, fields=None):
     """Detect tree top or stem base locations.
 
     Parameters
@@ -127,13 +159,21 @@ def tree_location(points, model_name, use_cuda=True, if_stem=False,
         Custom voxel resolution [x, y, z] in meters. Uses model default if None.
     progress_callback : callable, optional
         Called with progress percentage (0-100).
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
+    np.ndarray or None
         If if_stem=True: (M, 3) array of stem base XYZ locations.
         If if_stem=False: (N, 5) array of [x, y, z, confidence, radius] per point.
+        None if already classified.
     """
+    if check_classified and _check_existing_classification(fields, "tree_location"):
+        return None
+
     from modules.treeisonet.treeLoc import treeLoc
 
     config_file = get_config_path(model_name)
@@ -191,7 +231,8 @@ def post_peak_extraction(preds_tops, K=5, max_gap=0.3, min_rad=0.2,
 # ---------------------------------------------------------------------------
 
 def tree_offset(points, tree_locations, model_name, use_cuda=True,
-                custom_resolution=None, progress_callback=None, auto_download=True):
+                custom_resolution=None, progress_callback=None, auto_download=True,
+                check_classified=True, fields=None):
     """Segment crown points to tree locations using deep learning offset prediction.
 
     Parameters
@@ -204,12 +245,19 @@ def tree_offset(points, tree_locations, model_name, use_cuda=True,
         TreeOff model name.
     use_cuda : bool
         Use GPU acceleration.
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
-        Integer tree ID labels for each point (starting from 1).
+    np.ndarray or None
+        Integer tree ID labels for each point (starting from 1), or None if already classified.
     """
+    if check_classified and _check_existing_classification(fields, "tree_offset"):
+        return None
+
     from modules.treeisonet.treeOff import treeOff
 
     config_file = get_config_path(model_name)
@@ -228,7 +276,8 @@ def tree_offset(points, tree_locations, model_name, use_cuda=True,
 
 
 def stem_clustering(points, stem_cls, base_locations, min_res=0.06,
-                    max_isolated_distance=0.3, progress_callback=None):
+                    max_isolated_distance=0.3, progress_callback=None,
+                    check_classified=True, fields=None):
     """Cluster stem points to individual trees using shortest path algorithm.
 
     Parameters
@@ -239,12 +288,19 @@ def stem_clustering(points, stem_cls, base_locations, min_res=0.06,
         (N,) array of stem classification (>1 = stem point).
     base_locations : np.ndarray
         (M, 3) array of tree base XYZ coordinates.
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
-        Integer tree ID labels for each point.
+    np.ndarray or None
+        Integer tree ID labels for each point, or None if already classified.
     """
+    if check_classified and _check_existing_classification(fields, "stem_clustering"):
+        return None
+
     from modules.treeisonet.stemCluster import shortestpath3D
 
     cb = _make_progress_callback(progress_callback)
@@ -256,7 +312,8 @@ def stem_clustering(points, stem_cls, base_locations, min_res=0.06,
 
 
 def crown_clustering(points, treeoff, min_res=0.15, K=5, reg_strength=1.0,
-                     max_isolated_distance=0.3, progress_callback=None):
+                     max_isolated_distance=0.3, progress_callback=None,
+                     check_classified=True, fields=None):
     """Cluster crown points using graph-based segmentation.
 
     Parameters
@@ -271,12 +328,19 @@ def crown_clustering(points, treeoff, min_res=0.15, K=5, reg_strength=1.0,
         Number of nearest neighbors for graph construction.
     reg_strength : float
         Regularization strength for cut pursuit (or DBSCAN eps scaling).
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
-        Integer tree ID labels for each point.
+    np.ndarray or None
+        Integer tree ID labels for each point, or None if already classified.
     """
+    if check_classified and _check_existing_classification(fields, "crown_clustering"):
+        return None
+
     from modules.treeisonet.crownCluster import init_cutpursuit, shortestpath3D
 
     cb = _make_progress_callback(progress_callback)
@@ -293,7 +357,8 @@ def crown_clustering(points, treeoff, min_res=0.15, K=5, reg_strength=1.0,
 
 
 def crown_offset(points, stem_id, model_name, use_cuda=True,
-                 progress_callback=None, auto_download=True):
+                 progress_callback=None, auto_download=True,
+                 check_classified=True, fields=None):
     """Refine crown segmentation using deep learning 3D offset prediction.
 
     Parameters
@@ -304,12 +369,19 @@ def crown_offset(points, stem_id, model_name, use_cuda=True,
         (N,) array of stem/tree ID labels (0 = unassigned).
     model_name : str
         CrownOff model name.
+    check_classified : bool
+        If True, check for existing classification fields and warn/stop if found.
+    fields : dict, optional
+        Dictionary of existing scalar fields (e.g. from load_point_cloud).
 
     Returns
     -------
-    np.ndarray
-        Refined integer tree ID labels for each point.
+    np.ndarray or None
+        Refined integer tree ID labels for each point, or None if already classified.
     """
+    if check_classified and _check_existing_classification(fields, "crown_offset"):
+        return None
+
     from modules.treeisonet.crownOff import crownOff
 
     config_file = get_config_path(model_name)

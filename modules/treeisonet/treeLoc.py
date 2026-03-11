@@ -117,11 +117,36 @@ def treeLoc(config_file, pcd, model_path, use_cuda=True,if_stem=False,cutoff_thr
     except ImportError:
         from .vox3DSegFormerDetection import Segformer
 
+    device = "cuda" if use_cuda else "cpu"
+
+    # Load checkpoint first to detect architecture
+    if use_cuda:
+        state_dict = torch.load(model_path)
+    else:
+        state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+
+    # Extract non-model metadata from checkpoint
+    max_accu = state_dict.pop('max_accu', 0.0)
+
+    num_classes = configs["model"].get("num_classes", 3)
+
+    # Detect if checkpoint uses legacy 3D stem head vs current 2D stem head.
+    # Legacy checkpoints have Conv3d weights (5D tensors) in linear_pred,
+    # while the current architecture uses Conv2d weights (4D tensors).
+    # Legacy forward: pool → Conv3d (on depth=1 volume) → squeeze
+    # Current forward: pool → squeeze → Conv2d
+    use_legacy_stem = False
+    if if_stem and "linear_pred.0.weight" in state_dict:
+        if state_dict["linear_pred.0.weight"].ndim == 5:
+            use_legacy_stem = True
+
+    # Build model with if_stem=False for legacy case to avoid creating
+    # the incompatible Conv2d head; we'll add the correct Conv3d head below.
     model = Segformer(
-        if_stem=if_stem,
+        if_stem=if_stem and not use_legacy_stem,
         block3d_size=nbmat_sz,
         in_chans=1,
-        num_classes=3,
+        num_classes=num_classes,
         patch_size=configs["model"]["patch_size"],
         decoder_dim=configs["model"]["decoder_dim"],
         embed_dims=configs["model"]["channel_dims"],
@@ -130,21 +155,73 @@ def treeLoc(config_file, pcd, model_path, use_cuda=True,if_stem=False,cutoff_thr
         qkv_bias=configs["model"]["qkv_bias"],
         depths=configs["model"]["depths"],
         sr_ratios=configs["model"]["SR_ratios"],
-        drop_rate=0.0,drop_path_rate=0.0,
+        drop_rate=0.0, drop_path_rate=0.0,
     )
 
-    device = "cuda" if use_cuda else "cpu"
+    if use_legacy_stem:
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        # Remove the confidence/radius heads created by if_stem=False
+        del model.linear_confidence
+        del model.linear_radius
+
+        # Set stem mode and add pooling layer
+        model.if_stem = True
+        model.adaptive_pool = nn.AdaptiveMaxPool3d((1, None, None))
+
+        # Reconstruct the Conv3d prediction head to match checkpoint
+        decoder_dim = configs["model"]["decoder_dim"]
+        layers = []
+        i = 0
+        while True:
+            w_key = f"linear_pred.{i}.weight"
+            if w_key not in state_dict:
+                break
+            w = state_dict[w_key]
+            out_c, in_c = w.shape[0], w.shape[1]
+            ks = tuple(w.shape[2:])
+            padding = tuple(k // 2 for k in ks)
+            layers.append(nn.Conv3d(in_c, out_c, ks, padding=padding))
+            # If next index has no weight but the one after does, it's an activation
+            if f"linear_pred.{i+1}.weight" not in state_dict and f"linear_pred.{i+2}.weight" in state_dict:
+                layers.append(nn.GELU())
+                i += 2
+            else:
+                i += 1
+        model.linear_pred = nn.Sequential(*layers)
+
+        # Override forward: legacy path does pool → Conv3d → squeeze (not squeeze → Conv2d)
+        _orig_forward = model.forward
+        def _legacy_forward(x, _model=model):
+            d_out, h_out, w_out = x.size()[2], x.size()[3], x.size()[4]
+            features = _model.forward_features(x)
+            c1, c2, c3, c4 = features
+            n = c4.shape[0]
+            x = _model.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3], c4.shape[4])
+            x = F.interpolate(x, size=c3.size()[2:], mode='trilinear', align_corners=False)
+            c3_feat = _model.linear_c3(c3).permute(0, 2, 1).reshape(n, -1, c3.shape[2], c3.shape[3], c3.shape[4])
+            x = _model.skip_fusions[0](x, c3_feat)
+            x = F.interpolate(x, size=c2.size()[2:], mode='trilinear', align_corners=False)
+            c2_feat = _model.linear_c2(c2).permute(0, 2, 1).reshape(n, -1, c2.shape[2], c2.shape[3], c2.shape[4])
+            x = _model.skip_fusions[1](x, c2_feat)
+            x = F.interpolate(x, size=c1.size()[2:], mode='trilinear', align_corners=False)
+            c1_feat = _model.linear_c1(c1).permute(0, 2, 1).reshape(n, -1, c1.shape[2], c1.shape[3], c1.shape[4])
+            x = _model.skip_fusions[2](x, c1_feat)
+            x = _model.linear_fuse(x)
+            x = _model.dropout(x)
+            x = F.interpolate(input=x, size=(d_out, h_out, w_out), mode='trilinear', align_corners=True)
+            # Legacy stem: pool depth → Conv3d on depth=1 volume → squeeze to 4D
+            x = _model.adaptive_pool(x)
+            x = _model.linear_pred(x)
+            x = x.squeeze(2)
+            return x
+        model.forward = _legacy_forward
 
     if use_cuda:
         model = model.cuda()
-        state_dict = torch.load(model_path)
-    else:
-        state_dict = torch.load(model_path,map_location=torch.device('cpu'))
 
-    model.max_accu = state_dict.get('max_accu', 0.0)
-    if 'max_accu' in state_dict:
-        state_dict.pop('max_accu')
-
+    model.max_accu = max_accu
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -216,7 +293,7 @@ def treeLoc(config_file, pcd, model_path, use_cuda=True,if_stem=False,cutoff_thr
 
         tree = cKDTree(pcd[:,:2])
         pred_idxs = tree.query_ball_point(pred_coord[:, :2], 0.2,p=2)
-        preds = np.array([pcd[pred_idx[np.argmin(pcd[pred_idx, 2])], :3] for pred_idx in pred_idxs])
+        preds = np.array([pcd[pred_idx[np.argmin(pcd[pred_idx, 2])], :3] for pred_idx in pred_idxs if len(pred_idx) > 0])
 
     else:
         preds=np.zeros([len(pcd),5],dtype=np.float32)
